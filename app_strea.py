@@ -1,203 +1,110 @@
-import os
-import uuid
-from datetime import datetime
-
+import io
 import requests
 import streamlit as st
 
-# ===========================
-# CONFIG
-# ===========================
+BACKEND_HOST = "49.200.100.22"
+MODEL_PORTS = [6004, 6005]  # Model 1, Model 2
+TIMEOUT_SEC = 120
 
-# Unified audio directory for both Streamlit and ASR apps
-AUDIO_BASE = os.path.expanduser("~/Streamlit/Audio/Hindi")
+st.set_page_config(page_title="Hindi ASR – Model Compare", layout="wide")
 
-# Backend H200 server
-BACKEND_HOST = "http://49.200.100.22"
+st.title("Hindi ASR – Compare Two Models")
 
-# Two ASR model endpoints
-MODEL_ENDPOINTS = {
-    "Model 1 (port 6004)": f"{BACKEND_HOST}:6004/convertSpeechToText",
-    "Model 2 (port 6005)": f"{BACKEND_HOST}:6005/convertSpeechToText",
-}
-
-
-# ===========================
-# HELPERS
-# ===========================
-
-def ensure_dirs():
-    """Create the unified audio directory if it doesn't exist."""
-    os.makedirs(AUDIO_BASE, exist_ok=True)
-
-
-def save_audio_file(audio_bytes: bytes) -> str:
-    """
-    Save recorded audio into the unified folder:
-        ~/Streamlit/Audio/Hindi
-
-    Returns:
-        filename (str): The filename only (not the full path),
-                        which will be passed to the ASR APIs.
-    """
-    ensure_dirs()
-
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    uid = uuid.uuid4().hex[:6]
-    filename = f"hindi_rec_{ts}_{uid}.wav"
-
-    full_path = os.path.join(AUDIO_BASE, filename)
-    with open(full_path, "wb") as f:
-        f.write(audio_bytes)
-
-    return filename
-
-
-def call_model(endpoint: str, audio_filename: str):
-    """
-    Call a single ASR FastAPI model's /convertSpeechToText endpoint.
-
-    The ASR app is expected to read from the unified folder:
-        VOICE_REQUEST_DIR = ~/Streamlit/Audio/Hindi
-
-    Args:
-        endpoint (str): Full URL of the FastAPI endpoint.
-        audio_filename (str): Name of the file saved in AUDIO_BASE.
-
-    Returns:
-        dict: Parsed / simplified model response.
-    """
-    payload = {
-        "audioFileName": audio_filename,
-        "new_session_data": {},  # they default safely if this is empty
-    }
-
-    try:
-        resp = requests.post(endpoint, json=payload, timeout=300)
-        resp.raise_for_status()
-    except requests.exceptions.RequestException as e:
-        return {"error": f"Request failed: {e}"}
-
-    try:
-        data = resp.json()
-    except ValueError:
-        return {"error": "Could not decode JSON from model response"}
-
-    results = data.get("results", [])
-    if not results:
-        return {"error": "No results returned by model", "raw": data}
-
-    r0 = results[0]
-
-    return {
-        "status": r0.get("status", "unknown"),
-        "raw_hindi": r0.get("raw_transcription", ""),
-        "corrected_hindi": r0.get("corrected_hindi", ""),
-        "english": r0.get("english_translation", ""),
-        "audio_duration": r0.get("audio_duration_seconds"),
-        "speech_probability": r0.get("speech_probability"),
-        "full_raw_response": data,
-    }
-
-
-# ===========================
-# STREAMLIT UI
-# ===========================
-
-st.set_page_config(
-    page_title="Hindi ASR Comparator",
-    layout="centered",
+st.caption(
+    f"Audio is sent to two FastAPI apps running on "
+    f"**{BACKEND_HOST}:6004** and **{BACKEND_HOST}:6005**, and saved on the server in "
+    "`/home/oobadmin/Streamlit/Audio/Hindi` by the backend."
 )
 
-st.title("🎙 Hindi ASR & Translation – Model Comparison")
+st.markdown("---")
 
-st.markdown(
-    """
-1. Record a Hindi audio clip using your mic.  
-2. The audio is stored on the server at `~/Streamlit/Audio/Hindi`.  
-3. The same file is sent to **two ASR+translation models** running on ports **6004** and **6005**.  
-4. Their outputs are displayed side-by-side for comparison.
-"""
-)
+# -------------------- Audio recording --------------------
 
-st.info(
-    "Make sure your FastAPI apps (`apphi1.py` and `apphi2.py`) are running on "
-    "`49.200.100.22:6004` and `:6005` and are configured to read audio from "
-    "`~/Streamlit/Audio/Hindi`."
-)
+st.subheader("1. Record Hindi audio")
 
-# Audio recording widget
-# max_duration=60 => the top scale shows 0:00 → 1:00 instead of 30 minutes
 audio_file = st.audio_input(
     "Click to record your Hindi audio, then click again to stop:",
-    max_duration=60,  # seconds
     key="audio_rec",
 )
 
-
 if audio_file is None:
-    st.write("👆 Record some audio to begin.")
-else:
-    st.success("Audio captured.")
+    st.info("👆 Record some audio to begin.")
+    st.stop()
 
-    # NOTE: We DO NOT call st.audio(audio_file) here,
-    # so there is no separate audio player and no download option.
+# Read bytes once
+audio_bytes = audio_file.getvalue()
 
-    if st.button("Send to both models"):
-        audio_bytes = audio_file.getbuffer()
+# Small playback (this uses the recorded bytes; browser may show default audio controls)
+st.success("Audio captured.")
+st.audio(audio_bytes, format="audio/wav")
 
-        with st.spinner("Saving audio and contacting both models..."):
-            # Save once to the unified folder
+st.markdown("---")
+
+# -------------------- Send to backend --------------------
+
+st.subheader("2. Send to models and view outputs")
+
+if "results" not in st.session_state:
+    st.session_state["results"] = None
+
+col_btn, _ = st.columns([1, 3])
+
+with col_btn:
+    if st.button("Send to both models", type="primary"):
+        results = {}
+        for idx, port in enumerate(MODEL_PORTS, start=1):
+            model_label = f"Model {idx} (port {port})"
+            url = f"http://{BACKEND_HOST}:{port}/streamlitTranscribe"
+
             try:
-                filename = save_audio_file(audio_bytes)
+                resp = requests.post(
+                    url,
+                    files={"file": ("recording.wav", io.BytesIO(audio_bytes), "audio/wav")},
+                    timeout=TIMEOUT_SEC,
+                )
+                if resp.status_code != 200:
+                    results[model_label] = {
+                        "error": f"HTTP {resp.status_code}: {resp.text}"
+                    }
+                else:
+                    results[model_label] = resp.json()
             except Exception as e:
-                st.error(f"Failed to save audio on server: {e}")
-                st.stop()
+                results[model_label] = {"error": str(e)}
 
-            st.caption(f"Saved audio file: `{filename}` in `~/Streamlit/Audio/Hindi`")
+        st.session_state["results"] = results
 
-            # Call both endpoints
-            model_outputs = {}
-            for model_name, endpoint in MODEL_ENDPOINTS.items():
-                model_outputs[model_name] = call_model(endpoint, filename)
+# -------------------- Show results --------------------
 
-        st.subheader("Model Outputs")
+st.markdown("---")
+st.subheader("3. Model Outputs")
 
-        # Display results side-by-side
-        col1, col2 = st.columns(2)
+results = st.session_state.get("results")
+if not results:
+    st.info("Run inference first by clicking **Send to both models**.")
+    st.stop()
 
-        for col, (model_name, result) in zip((col1, col2), model_outputs.items()):
-            with col:
-                st.markdown(f"### {model_name}")
+col1, col2 = st.columns(2)
 
-                if "error" in result:
-                    st.error(result["error"])
-                    if "raw" in result:
-                        with st.expander("Raw response"):
-                            st.json(result["raw"])
-                    continue
+cols = [col1, col2]
+for (model_label, result), col in zip(results.items(), cols):
+    with col:
+        st.markdown(f"### {model_label}")
 
-                st.markdown("**Status:** " + str(result.get("status", "unknown")))
+        if "error" in result:
+            st.error(f"Request failed:\n\n`{result['error']}`")
+            continue
 
-                dur = result.get("audio_duration")
-                sp = result.get("speech_probability")
-                if dur is not None or sp is not None:
-                    st.caption(
-                        f"Duration: {dur:.2f} s | Speech probability: {sp:.3f}"
-                        if dur is not None and sp is not None
-                        else f"Duration: {dur} s"
-                        if dur is not None
-                        else f"Speech prob: {sp}"
-                    )
+        st.markdown(
+            f"**Saved file on server:** `{result.get('file','?')}`  \n"
+            f"**Duration (s):** `{result.get('audio_duration_seconds','?')}`  \n"
+            f"**Speech probability:** `{result.get('speech_probability','?')}`"
+        )
 
-                st.markdown("**Raw Hindi transcript:**")
-                st.write(result.get("raw_hindi", ""))
+        st.markdown("**Hindi (raw):**")
+        st.code(result.get("raw_hindi", "N/A"), language="text")
 
-                st.markdown("**Corrected Hindi transcript:**")
-                st.write(result.get("corrected_hindi", ""))
+        st.markdown("**Hindi (corrected):**")
+        st.code(result.get("corrected_hindi", "N/A"), language="text")
 
-                st.markdown("**English translation:**")
-                st.write(result.get("english", ""))
-
-                with st.expander("Full JSON response"):
-                    st.json(result.get("full_raw_response", {}))
+        st.markdown("**English translation:**")
+        st.code(result.get("english_translation", "N/A"), language="text")
