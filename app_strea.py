@@ -130,10 +130,10 @@ st.info(
 # max_duration=60 => the top scale shows 0:00 → 1:00 instead of 30 minutes
 audio_file = st.audio_input(
     "Click to record your Hindi audio, then click again to stop:",
-    format="audio/wav",
     max_duration=60,  # seconds
     key="audio_rec",
 )
+
 
 if audio_file is None:
     st.write("👆 Record some audio to begin.")
