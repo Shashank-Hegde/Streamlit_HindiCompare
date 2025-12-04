@@ -127,15 +127,21 @@ st.info(
 )
 
 # Audio recording widget
-audio_file = st.audio_input("Click to record your Hindi audio, then click again to stop:")
+# max_duration=60 => the top scale shows 0:00 → 1:00 instead of 30 minutes
+audio_file = st.audio_input(
+    "Click to record your Hindi audio, then click again to stop:",
+    format="audio/wav",
+    max_duration=60,  # seconds
+    key="audio_rec",
+)
 
 if audio_file is None:
     st.write("👆 Record some audio to begin.")
 else:
     st.success("Audio captured.")
 
-    # Optional playback preview
-    st.audio(audio_file)
+    # NOTE: We DO NOT call st.audio(audio_file) here,
+    # so there is no separate audio player and no download option.
 
     if st.button("Send to both models"):
         audio_bytes = audio_file.getbuffer()
