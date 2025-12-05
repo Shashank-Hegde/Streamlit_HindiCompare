@@ -1,5 +1,5 @@
-
 import io
+import time  # <-- NEW
 from datetime import datetime
 
 import requests
@@ -9,7 +9,7 @@ BACKEND_HOST = "49.200.100.22"
 MODEL_PORTS = [6004, 6005]  # FastAPI apps with /streamlitTranscribe
 TIMEOUT_SEC = 180
 
-st.set_page_config(page_title="Hindi ASR – Model Compare", layout="wide")
+st.set_page_config(page_title="Hindi ASR – Compare Two Models", layout="wide")
 
 st.title("Hindi ASR – Compare Two Models")
 
@@ -58,7 +58,7 @@ if audio_bytes is None:
     st.stop()
 
 st.success("Audio ready.")
-st.audio(audio_bytes, format="audio/wav")  # Note: browsers may still allow technical download
+st.audio(audio_bytes, format="audio/wav")
 
 st.markdown("---")
 st.subheader("2. Send to models and view outputs")
@@ -84,6 +84,7 @@ with col_btn:
             url = f"http://{BACKEND_HOST}:{port}/streamlitTranscribe"
 
             try:
+                start_t = time.perf_counter()
                 resp = requests.post(
                     url,
                     data={"client_filename": audio_label},  # shared logical name
@@ -96,14 +97,23 @@ with col_btn:
                     },
                     timeout=TIMEOUT_SEC,
                 )
+                rtt = time.perf_counter() - start_t  # seconds
+
                 if resp.status_code != 200:
                     results[model_label] = {
-                        "error": f"HTTP {resp.status_code}: {resp.text}"
+                        "error": f"HTTP {resp.status_code}: {resp.text}",
+                        "rtt_seconds": round(rtt, 3),
                     }
                 else:
-                    results[model_label] = resp.json()
+                    data = resp.json()
+                    # attach RTT to the model's JSON so it shows up in UI
+                    data["rtt_seconds"] = round(rtt, 3)
+                    results[model_label] = data
             except Exception as e:
-                results[model_label] = {"error": str(e)}
+                results[model_label] = {
+                    "error": str(e),
+                    "rtt_seconds": None,
+                }
 
         st.session_state["results"] = results
 
@@ -129,6 +139,11 @@ cols = [col1, col2]
 for (model_label, result), col in zip(results.items(), cols):
     with col:
         st.markdown(f"### {model_label}")
+
+        # RTT line (even if there was an error)
+        rtt_val = result.get("rtt_seconds")
+        if rtt_val is not None:
+            st.markdown(f"**RTT (request–response, s):** `{rtt_val}`")
 
         if "error" in result:
             st.error(f"Request failed:\n\n`{result['error']}`")
