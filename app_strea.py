@@ -103,7 +103,7 @@ for (model_name, result), col in zip(results.items(), cols):
             result.get("raw_hindi")
             or result.get("raw_transcription")
             or "N/A"
-        )
+        ) 
         corrected_hindi = result.get("corrected_hindi", "N/A")
         english_translation = result.get("english_translation", "N/A")
         duration = result.get("audio_duration_seconds", result.get("audio_duration", "N/A"))
