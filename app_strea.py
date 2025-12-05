@@ -13,30 +13,51 @@ st.set_page_config(page_title="Hindi ASR – Model Compare", layout="wide")
 st.title("Hindi ASR – Compare Two Models")
 
 st.caption(
-    f"Audio is recorded in the browser and uploaded directly to FastAPI apps on "
-    f"**{BACKEND_HOST}:6004** and **{BACKEND_HOST}:6005** via `/streamlitTranscribe`. "
-    "The backend saves/processes the file on the server and returns transcripts."
+    f"Speak in Hindi or mixture of Hindi and English"
 )
 
 st.markdown("---")
 
-# -------------------- Audio recording --------------------
+# -------------------- Audio input (record or upload) --------------------
 
-st.subheader("1. Record Hindi audio")
+st.subheader("1. Provide Hindi audio")
 
-audio_file = st.audio_input(
-    "Click to record your Hindi audio, then click again to stop:",
-    key="audio_rec",
+input_method = st.radio(
+    "Choose input method:",
+    ["Record with microphone", "Upload WAV file"],
+    index=0,
+    key="audio_input_method",
 )
 
-if audio_file is None:
-    st.info("👆 Record some audio to begin.")
+audio_bytes = None
+
+if input_method == "Record with microphone":
+    audio_file = st.audio_input(
+        "Click to record your Hindi audio, then click again to stop:",
+        key="audio_rec",
+    )
+    if audio_file is not None:
+        audio_bytes = audio_file.getvalue()
+
+elif input_method == "Upload WAV file":
+    uploaded_file = st.file_uploader(
+        "Upload a .wav file with Hindi audio:",
+        type=["wav"],
+        key="audio_upload",
+    )
+    if uploaded_file is not None:
+        # Read the raw bytes from the uploaded WAV
+        audio_bytes = uploaded_file.read()
+
+if audio_bytes is None:
+    if input_method == "Record with microphone":
+        st.info("👆 Record some audio to begin.")
+    else:
+        st.info("👆 Upload a .wav file to begin.")
     st.stop()
 
-# Read bytes once
-audio_bytes = audio_file.getvalue()
-st.success("Audio captured.")
-st.audio(audio_bytes, format="audio/wav")
+st.success("Audio ready.")
+st.audio(audio_bytes, format="audio/wav")  # Note: browsers may still allow technical download
 
 st.markdown("---")
 st.subheader("2. Send to models and view outputs")
@@ -51,24 +72,24 @@ col_btn, _ = st.columns([1, 3])
 
 with col_btn:
     if st.button("Send to both models", type="primary"):
-        # ---- Generate ONE shared filename for this recording ----
+        # ---- Generate ONE shared filename for this audio ----
         ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         audio_label = f"streamlit_hindi_{ts}.wav"
         st.session_state["audio_label"] = audio_label
 
         results = {}
         for idx, port in enumerate(MODEL_PORTS, start=1):
-            model_label = f"Model {idx} (port {port})"
+            model_label = f"Model {idx}"
             url = f"http://{BACKEND_HOST}:{port}/streamlitTranscribe"
 
             try:
                 resp = requests.post(
                     url,
-                    data={"client_filename": audio_label},  # <-- shared name
+                    data={"client_filename": audio_label},  # shared logical name
                     files={
                         "file": (
-                            "recording.wav",
-                            io.BytesIO(audio_bytes),
+                            "recording.wav",           # form filename
+                            io.BytesIO(audio_bytes),  # same bytes to both models
                             "audio/wav",
                         )
                     },
@@ -92,7 +113,7 @@ st.subheader("3. Model Outputs")
 
 if st.session_state.get("audio_label"):
     st.markdown(
-        f"**Shared audio filename for this run:** "
+        f"**Shared audio filename for this run (client label):** "
         f"`{st.session_state['audio_label']}`"
     )
 
@@ -120,7 +141,10 @@ for (model_label, result), col in zip(results.items(), cols):
         )
 
         st.markdown("**Hindi (raw):**")
-        st.code(result.get("raw_hindi", result.get("raw_transcription", "N/A")), language="text")
+        st.code(
+            result.get("raw_hindi", result.get("raw_transcription", "N/A")),
+            language="text",
+        )
 
         st.markdown("**Hindi (corrected):**")
         st.code(result.get("corrected_hindi", "N/A"), language="text")
