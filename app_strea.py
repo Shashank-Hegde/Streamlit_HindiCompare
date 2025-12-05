@@ -72,7 +72,7 @@ if "final_audio_bytes" not in st.session_state:
             st.info("👆 Upload a .wav file to begin.")
         st.stop()
 
-    st.success("Audio captured. Preview below (download hidden).")
+    st.success("Audio captured. Preview below")
     st.audio(audio_bytes_temp, format="audio/wav")
 
     # Lock the audio so the recorder/uploader disappears on next run
