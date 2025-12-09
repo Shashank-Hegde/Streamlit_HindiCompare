@@ -64,8 +64,19 @@ st.audio(audio_bytes, format="audio/wav")
 st.markdown("---")
 st.subheader("2. Send to models and view outputs")
 
-if "results" not in st.session_state:
-    st.session_state["results"] = None
+st.markdown("### VAD / Speech detection threshold")
+
+vad_threshold = st.slider(
+    "Threshold (lower = more sensitive, higher = stricter)",
+    min_value=0.0,
+    max_value=1.0,
+    value=0.2,   # start near your current PANNS threshold
+    step=0.01,
+    help=(
+        "Controls speech vs noise detection inside the backend "
+        "(PANNS + Silero VAD). Try 0.1–0.3 for noisy audio."
+    ),
+)
 
 if "audio_label" not in st.session_state:
     st.session_state["audio_label"] = None
@@ -87,12 +98,15 @@ with col_btn:
             try:
                 start_t = time.perf_counter()
                 resp = requests.post(
-                    url,
-                    data={"client_filename": audio_label},  # shared logical name
+                    data={
+                        "client_filename": audio_label,   # shared logical name
+                        "panns_threshold": vad_threshold, # used for PANNS speech/noise
+                        "vad_threshold": vad_threshold,   # used for Silero VAD
+                    },
                     files={
                         "file": (
-                            "recording.wav",           # form filename
-                            io.BytesIO(audio_bytes),  # same bytes to both models
+                            "recording.wav",
+                            io.BytesIO(audio_bytes),
                             "audio/wav",
                         )
                     },
