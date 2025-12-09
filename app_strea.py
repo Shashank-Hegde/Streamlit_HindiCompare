@@ -1,4 +1,3 @@
-
 import io
 import time  # <-- NEW
 from datetime import datetime
@@ -14,9 +13,7 @@ st.set_page_config(page_title="Hindi ASR – Compare Two Models", layout="wide")
 
 st.title("Hindi ASR – Compare Two Models")
 
-st.caption(
-    f"Speak in Hindi or mixture of Hindi and English"
-)
+st.caption("Speak in Hindi or mixture of Hindi and English")
 
 st.markdown("---")
 
@@ -64,6 +61,8 @@ st.audio(audio_bytes, format="audio/wav")
 st.markdown("---")
 st.subheader("2. Send to models and view outputs")
 
+# -------------------- VAD / PANNS threshold slider --------------------
+
 st.markdown("### VAD / Speech detection threshold")
 
 vad_threshold = st.slider(
@@ -77,6 +76,9 @@ vad_threshold = st.slider(
         "(PANNS + Silero VAD). Try 0.1–0.3 for noisy audio."
     ),
 )
+
+if "results" not in st.session_state:
+    st.session_state["results"] = None
 
 if "audio_label" not in st.session_state:
     st.session_state["audio_label"] = None
@@ -98,10 +100,11 @@ with col_btn:
             try:
                 start_t = time.perf_counter()
                 resp = requests.post(
+                    url,  # <-- REQUIRED positional argument
                     data={
                         "client_filename": audio_label,   # shared logical name
-                        "panns_threshold": vad_threshold, # used for PANNS speech/noise
-                        "vad_threshold": vad_threshold,   # used for Silero VAD
+                        "panns_threshold": vad_threshold, # for PANNS speech/noise
+                        "vad_threshold": vad_threshold,   # for Silero VAD
                     },
                     files={
                         "file": (
