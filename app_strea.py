@@ -1,5 +1,6 @@
+
 import io
-import time
+import time  # <-- NEW
 from datetime import datetime
 
 import requests
@@ -36,7 +37,6 @@ if input_method == "Record with microphone":
         key="audio_rec",
     )
     if audio_file is not None:
-        # This will typically be ~48 kHz from Streamlit's recorder
         audio_bytes = audio_file.getvalue()
 
 elif input_method == "Upload WAV file":
@@ -46,6 +46,7 @@ elif input_method == "Upload WAV file":
         key="audio_upload",
     )
     if uploaded_file is not None:
+        # Read the raw bytes from the uploaded WAV
         audio_bytes = uploaded_file.read()
 
 if audio_bytes is None:
@@ -100,7 +101,7 @@ with col_btn:
             try:
                 start_t = time.perf_counter()
                 resp = requests.post(
-                    url,
+                    url,  # <-- REQUIRED positional argument
                     data={
                         "client_filename": audio_label,   # shared logical name
                         "panns_threshold": vad_threshold, # for PANNS speech/noise
@@ -109,7 +110,7 @@ with col_btn:
                     files={
                         "file": (
                             "recording.wav",
-                            io.BytesIO(audio_bytes),  # <-- raw bytes (48 kHz from mic)
+                            io.BytesIO(audio_bytes),
                             "audio/wav",
                         )
                     },
