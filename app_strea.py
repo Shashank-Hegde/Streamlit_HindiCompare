@@ -4,6 +4,7 @@ from datetime import datetime
 
 import requests
 import streamlit as st
+from pydub import AudioSegment  # <-- NEW
 
 BACKEND_HOST = "49.200.100.22"
 MODEL_PORTS = [6004, 6005]  # FastAPI apps with /streamlitTranscribe
@@ -16,6 +17,29 @@ st.title("Hindi ASR – Compare Two Models")
 st.caption("Speak in Hindi or mixture of Hindi and English")
 
 st.markdown("---")
+
+# ---------- NEW: helper to enforce 16kHz mono WAV on the client ----------
+
+def ensure_16k_mono_wav_bytes(audio_bytes: bytes) -> bytes:
+    """
+    Ensure the audio is 16 kHz, mono, WAV.
+
+    - If already 16 kHz + mono, return original bytes.
+    - Else, resample to 16 kHz mono and return new WAV bytes.
+    """
+    # audio_input and upload are both WAV in your current UI
+    audio = AudioSegment.from_wav(io.BytesIO(audio_bytes))
+
+    # If already 16kHz mono, do nothing
+    if audio.frame_rate == 16000 and audio.channels == 1:
+        return audio_bytes
+
+    # Otherwise, resample + downmix
+    audio = audio.set_frame_rate(16000).set_channels(1)
+    buf = io.BytesIO()
+    audio.export(buf, format="wav")
+    buf.seek(0)
+    return buf.getvalue()
 
 # -------------------- Audio input (record or upload) --------------------
 
@@ -54,6 +78,9 @@ if audio_bytes is None:
     else:
         st.info("👆 Upload a .wav file to begin.")
     st.stop()
+
+# 🔴 IMPORTANT: force to 16 kHz mono WAV here
+audio_bytes = ensure_16k_mono_wav_bytes(audio_bytes)
 
 st.success("Audio ready.")
 st.audio(audio_bytes, format="audio/wav")
@@ -100,7 +127,7 @@ with col_btn:
             try:
                 start_t = time.perf_counter()
                 resp = requests.post(
-                    url,  # <-- REQUIRED positional argument
+                    url,
                     data={
                         "client_filename": audio_label,   # shared logical name
                         "panns_threshold": vad_threshold, # for PANNS speech/noise
@@ -109,7 +136,7 @@ with col_btn:
                     files={
                         "file": (
                             "recording.wav",
-                            io.BytesIO(audio_bytes),
+                            io.BytesIO(audio_bytes),  # <-- now 16 kHz mono
                             "audio/wav",
                         )
                     },
@@ -124,7 +151,6 @@ with col_btn:
                     }
                 else:
                     data = resp.json()
-                    # attach RTT to the model's JSON so it shows up in UI
                     data["rtt_seconds"] = round(rtt, 3)
                     results[model_label] = data
             except Exception as e:
