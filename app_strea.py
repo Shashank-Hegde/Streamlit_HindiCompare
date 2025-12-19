@@ -1,4 +1,5 @@
 
+
 import io
 import time  # <-- NEW
 from datetime import datetime
@@ -96,7 +97,7 @@ with col_btn:
         results = {}
         for idx, port in enumerate(MODEL_PORTS, start=1):
             model_label = f"Model {idx}, (Port {port})"
-            url = f"http://{BACKEND_HOST}:{port}/convertSpeechToText"
+            url = f"http://{BACKEND_HOST}:{port}/streamlitTranscribe"
 
             try:
                 start_t = time.perf_counter()
