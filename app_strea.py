@@ -1,5 +1,3 @@
-
-
 import io
 import time  # <-- NEW
 from datetime import datetime
@@ -85,6 +83,14 @@ if "results" not in st.session_state:
 if "audio_label" not in st.session_state:
     st.session_state["audio_label"] = None
 
+# -------------------- ADDED: mem log UI preferences --------------------
+if "show_mem_logs" not in st.session_state:
+    st.session_state["show_mem_logs"] = True
+
+if "mem_log_lines" not in st.session_state:
+    st.session_state["mem_log_lines"] = 30  # default show last N lines
+# ----------------------------------------------------------------------
+
 col_btn, _ = st.columns([1, 3])
 
 with col_btn:
@@ -148,6 +154,21 @@ if st.session_state.get("audio_label"):
         f"`{st.session_state['audio_label']}`"
     )
 
+# -------------------- ADDED: global toggle for mem logs --------------------
+with st.expander("Debug UI: Memory logs settings", expanded=False):
+    st.session_state["show_mem_logs"] = st.checkbox(
+        "Show memory logs from backend",
+        value=st.session_state["show_mem_logs"],
+    )
+    st.session_state["mem_log_lines"] = st.slider(
+        "How many last lines to show per model",
+        min_value=5,
+        max_value=200,
+        value=st.session_state["mem_log_lines"],
+        step=5,
+    )
+# --------------------------------------------------------------------------
+
 results = st.session_state.get("results")
 if not results:
     st.info("Run inference first by clicking **Send to both models**.")
@@ -187,3 +208,20 @@ for (model_label, result), col in zip(results.items(), cols):
 
         st.markdown("**English translation:**")
         st.code(result.get("english_translation", "N/A"), language="text")
+
+        # -------------------- ADDED: show mem logs from backend --------------------
+        if st.session_state["show_mem_logs"]:
+            st.markdown("**Memory logs (backend):**")
+
+            last_line = result.get("mem_logs_last", None)
+            if last_line:
+                st.caption(f"Last: {last_line}")
+
+            mem_logs = result.get("mem_logs", None)
+            if isinstance(mem_logs, list) and len(mem_logs) > 0:
+                n = st.session_state["mem_log_lines"]
+                tail = mem_logs[-n:]
+                st.code("\n".join(tail), language="text")
+            else:
+                st.info("No mem logs returned (backend missing mem_logs fields or empty).")
+        # -------------------------------------------------------------------------
