@@ -6,7 +6,7 @@ import requests
 import streamlit as st
 
 BACKEND_HOST = "49.200.100.22"
-MODEL_PORTS = [6004, 6005]  # FastAPI apps with /streamlitTranscribe
+MODEL_PORTS = [6005]  # FastAPI apps with /streamlitTranscribe
 TIMEOUT_SEC = 180
 
 st.set_page_config(page_title="Hindi ASR – Compare Two Models", layout="wide")
@@ -103,7 +103,7 @@ with col_btn:
         results = {}
         for idx, port in enumerate(MODEL_PORTS, start=1):
             model_label = f"Model {idx}, (Port {port})"
-            url = f"http://{BACKEND_HOST}:{port}/convertSpeechToText"
+            url = f"http://{BACKEND_HOST}:{port}/streamlitTranscribe"
 
             try:
                 start_t = time.perf_counter()
