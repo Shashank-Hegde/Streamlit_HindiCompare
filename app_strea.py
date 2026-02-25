@@ -1,227 +1,263 @@
-import io
-import time  # <-- NEW
+import json
+import time
 from datetime import datetime
 
 import requests
 import streamlit as st
 
+# =========================
+# Streamlit page setup
+# =========================
+st.set_page_config(page_title="Parallel Transcribe (Upload / Record)", layout="wide")
+st.title("Parallel Transcribe (Upload / Record)")
+
+# =========================
+# Config
+# =========================
 BACKEND_HOST = "49.200.100.22"
-MODEL_PORTS = [6005]  # FastAPI apps with /streamlitTranscribe
-TIMEOUT_SEC = 180
 
-st.set_page_config(page_title="Hindi ASR – Compare Two Models", layout="wide")
+# IMPORTANT: Only 6005 is alive per your curl output
+MODEL_PORTS = [6005]
 
-st.title("Hindi ASR – Compare Two Models")
+TIMEOUT_SEC = 120  # keep reasonable; backend is fast per curl
 
-st.caption("Speak in Hindi or mixture of Hindi and English")
+# Endpoint used by Streamlit
+API_PATH = "/streamlitTranscribe"
 
-st.markdown("---")
+# Where we store basic debug info across reruns
+if "last_debug" not in st.session_state:
+    st.session_state["last_debug"] = {}
 
-# -------------------- Audio input (record or upload) --------------------
+# =========================
+# Sidebar controls
+# =========================
+with st.sidebar:
+    st.header("Backend Settings")
 
-st.subheader("1. Provide Hindi audio")
+    backend_host = st.text_input("Backend host", value=BACKEND_HOST)
+    ports_str = st.text_input("Ports (comma-separated)", value=",".join(map(str, MODEL_PORTS)))
+    try:
+        model_ports = [int(p.strip()) for p in ports_str.split(",") if p.strip()]
+        if not model_ports:
+            model_ports = [6005]
+    except Exception:
+        model_ports = [6005]
 
+    timeout_sec = st.number_input("HTTP timeout (seconds)", min_value=5, max_value=600, value=TIMEOUT_SEC, step=5)
+
+    st.divider()
+    st.header("Pipeline Flags (match curl)")
+
+    enable_hindi_correction = st.checkbox("enable_hindi_correction", value=True)
+    enable_english_translation = st.checkbox("enable_english_translation", value=True)
+    enable_ooc = st.checkbox("enable_ooc", value=True)
+    use_condensed_ooc = st.checkbox("use_condensed_ooc", value=True)
+
+    filler_threshold = st.slider("filler_threshold", 0.0, 1.0, 0.75, 0.01)
+    medical_threshold = st.slider("medical_threshold", 0.0, 1.0, 0.70, 0.01)
+
+    st.divider()
+    st.header("VAD/PA-NNS thresholds (if used)")
+
+    panns_threshold = st.slider("panns_threshold", 0.0, 1.0, 0.20, 0.01)
+    vad_threshold = st.slider("vad_threshold", 0.0, 1.0, 0.20, 0.01)
+
+    st.divider()
+    show_debug = st.checkbox("Show debug", value=True)
+    show_raw_response = st.checkbox("Show raw response text", value=False)
+    show_mem_logs = st.checkbox("Show mem_logs if present", value=False)
+
+# =========================
+# Input selection
+# =========================
+# IMPORTANT: Default to Upload WAV to avoid st.audio_input freeze issues
 input_method = st.radio(
-    "Choose input method:",
-    ["Record with microphone", "Upload WAV file"],
+    "Choose input method",
+    ["Upload WAV file", "Record with microphone (experimental)"],
     index=0,
-    key="audio_input_method",
 )
 
 audio_bytes = None
+audio_label = None
 
-if input_method == "Record with microphone":
-    audio_file = st.audio_input(
-        "Click to record your Hindi audio, then click again to stop:",
-        key="audio_rec",
-    )
-    if audio_file is not None:
-        audio_bytes = audio_file.getvalue()
-
-elif input_method == "Upload WAV file":
-    uploaded_file = st.file_uploader(
-        "Upload a .wav file with Hindi audio:",
-        type=["wav"],
-        key="audio_upload",
-    )
+if input_method == "Upload WAV file":
+    uploaded_file = st.file_uploader("Upload a WAV file", type=["wav"])
     if uploaded_file is not None:
-        # Read the raw bytes from the uploaded WAV
         audio_bytes = uploaded_file.read()
+        audio_label = uploaded_file.name
 
-if audio_bytes is None:
-    if input_method == "Record with microphone":
-        st.info("👆 Record some audio to begin.")
+elif input_method == "Record with microphone (experimental)":
+    st.info(
+        "If this gets stuck on some browsers, switch to 'Upload WAV file'. "
+        "Microphone permissions or widget state can cause Streamlit to appear frozen."
+    )
+    try:
+        audio_file = st.audio_input("Record audio")
+        if audio_file is not None:
+            audio_bytes = audio_file.getvalue()
+            # name it with timestamp
+            audio_label = f"recording_{datetime.utcnow().strftime('%Y-%m-%dT%H-%M-%S-%fZ')}.wav"
+    except Exception as e:
+        st.error(f"Audio input widget error: {e}")
+
+# Preview input audio
+if audio_bytes and audio_label:
+    st.success(f"Audio ready: {audio_label} ({len(audio_bytes)} bytes)")
+    st.audio(audio_bytes, format="audio/wav")
+
+st.divider()
+
+# =========================
+# Helper: call backend
+# =========================
+def call_backend(port: int, audio_bytes_local: bytes, filename: str):
+    """
+    Calls /streamlitTranscribe with multipart upload + form fields.
+    Mirrors your working curl flags so behavior is consistent.
+    """
+    url = f"http://{backend_host}:{port}{API_PATH}"
+
+    # Multipart file field must be named "file"
+    files = {
+        "file": (filename, audio_bytes_local, "audio/wav"),
+    }
+
+    # Form fields (strings are safest for multipart)
+    data = {
+        "client_filename": filename,
+        "panns_threshold": str(panns_threshold),
+        "vad_threshold": str(vad_threshold),
+        "enable_hindi_correction": "true" if enable_hindi_correction else "false",
+        "enable_english_translation": "true" if enable_english_translation else "false",
+        "enable_ooc": "true" if enable_ooc else "false",
+        "filler_threshold": str(filler_threshold),
+        "medical_threshold": str(medical_threshold),
+        "use_condensed_ooc": "true" if use_condensed_ooc else "false",
+    }
+
+    debug = {"url": url, "port": port, "filename": filename, "req_bytes": len(audio_bytes_local)}
+
+    t0 = time.perf_counter()
+    resp = requests.post(url, files=files, data=data, timeout=timeout_sec)
+    dt = time.perf_counter() - t0
+
+    debug["elapsed_sec"] = round(dt, 3)
+    debug["status_code"] = resp.status_code
+    debug["resp_len"] = len(resp.text)
+
+    # Try JSON
+    result = None
+    json_err = None
+    try:
+        result = resp.json()
+    except Exception as e:
+        json_err = str(e)
+
+    debug["json_parse_error"] = json_err
+    return resp, result, debug
+
+
+# =========================
+# Run button
+# =========================
+col_run1, col_run2 = st.columns([1, 2])
+
+with col_run1:
+    run = st.button("Send to backend", type="primary", use_container_width=True)
+
+with col_run2:
+    st.caption(
+        f"Endpoint: http://{BACKEND_HOST}:{MODEL_PORTS[0]}{API_PATH} (configured ports: {model_ports})"
+    )
+
+if run:
+    if not audio_bytes or not audio_label:
+        st.warning("Please upload/record an audio file first.")
     else:
-        st.info("👆 Upload a .wav file to begin.")
-    st.stop()
-
-st.success("Audio ready.")
-st.audio(audio_bytes, format="audio/wav")
-
-st.markdown("---")
-st.subheader("2. Send to models and view outputs")
-
-# -------------------- VAD / PANNS threshold slider --------------------
-
-st.markdown("### VAD / Speech detection threshold")
-
-vad_threshold = st.slider(
-    "Threshold (lower = more sensitive, higher = stricter)",
-    min_value=0.0,
-    max_value=1.0,
-    value=0.2,   # start near your current PANNS threshold
-    step=0.01,
-    help=(
-        "Controls speech vs noise detection inside the backend "
-        "(PANNS + Silero VAD). Try 0.1–0.3 for noisy audio."
-    ),
-)
-
-if "results" not in st.session_state:
-    st.session_state["results"] = None
-
-if "audio_label" not in st.session_state:
-    st.session_state["audio_label"] = None
-
-# -------------------- ADDED: mem log UI preferences --------------------
-if "show_mem_logs" not in st.session_state:
-    st.session_state["show_mem_logs"] = True
-
-if "mem_log_lines" not in st.session_state:
-    st.session_state["mem_log_lines"] = 30  # default show last N lines
-# ----------------------------------------------------------------------
-
-col_btn, _ = st.columns([1, 3])
-
-with col_btn:
-    if st.button("Send to both models", type="primary"):
-        # ---- Generate ONE shared filename for this audio ----
-        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        audio_label = f"streamlit_hindi_{ts}.wav"
-        st.session_state["audio_label"] = audio_label
-
         results = {}
-        for idx, port in enumerate(MODEL_PORTS, start=1):
-            model_label = f"Model {idx}, (Port {port})"
-            url = f"http://{BACKEND_HOST}:{port}/streamlitTranscribe"
+        debug_all = {}
 
-            try:
-                start_t = time.perf_counter()
-                resp = requests.post(
-                    url,  # <-- REQUIRED positional argument
-                    data={
-                        "client_filename": audio_label,   # shared logical name
-                        "panns_threshold": vad_threshold, # for PANNS speech/noise
-                        "vad_threshold": vad_threshold,   # for Silero VAD
-                    },
-                    files={
-                        "file": (
-                            "recording.wav",
-                            io.BytesIO(audio_bytes),
-                            "audio/wav",
-                        )
-                    },
-                    timeout=TIMEOUT_SEC,
-                )
-                rtt = time.perf_counter() - start_t  # seconds
+        with st.spinner(f"Calling backend on ports: {model_ports} ..."):
+            for idx, port in enumerate(model_ports, start=1):
+                model_label = f"Pipeline {idx} (port {port})"
+                try:
+                    st.write(f"DEBUG: calling {model_label} ...") if show_debug else None
+                    resp, parsed, dbg = call_backend(port, audio_bytes, audio_label)
+                    debug_all[model_label] = dbg
 
-                if resp.status_code != 200:
-                    results[model_label] = {
-                        "error": f"HTTP {resp.status_code}: {resp.text}",
-                        "rtt_seconds": round(rtt, 3),
-                    }
+                    if resp.status_code == 200 and isinstance(parsed, dict):
+                        results[model_label] = parsed
+                    else:
+                        results[model_label] = {
+                            "error": True,
+                            "status_code": resp.status_code,
+                            "text": resp.text[:2000],
+                        }
+
+                except requests.exceptions.ConnectTimeout as e:
+                    results[model_label] = {"error": True, "exception": f"ConnectTimeout: {e}"}
+                except requests.exceptions.ReadTimeout as e:
+                    results[model_label] = {"error": True, "exception": f"ReadTimeout: {e}"}
+                except requests.exceptions.ConnectionError as e:
+                    results[model_label] = {"error": True, "exception": f"ConnectionError: {e}"}
+                except Exception as e:
+                    results[model_label] = {"error": True, "exception": f"{type(e).__name__}: {e}"}
+
+        st.session_state["last_debug"] = debug_all
+
+        st.success("Done. Results below.")
+        st.divider()
+
+        # Render results
+        # Use as many columns as ports, up to 3 columns (nice layout)
+        ncols = min(max(len(model_ports), 1), 3)
+        cols = st.columns(ncols)
+
+        for i, (model_label, payload) in enumerate(results.items()):
+            with cols[i % ncols]:
+                st.subheader(model_label)
+
+                # Error
+                if isinstance(payload, dict) and payload.get("error"):
+                    st.error(payload)
+                    continue
+
+                # Normal payload
+                if isinstance(payload, dict):
+                    # Print key fields if present
+                    st.write("**file:**", payload.get("file", ""))
+                    st.write("**audio_duration_seconds:**", payload.get("audio_duration_seconds", ""))
+                    st.write("**raw_hindi:**", payload.get("raw_hindi", payload.get("raw_transcription", "")))
+                    st.write("**corrected_hindi:**", payload.get("corrected_hindi", ""))
+                    st.write("**english_translation:**", payload.get("english_translation", payload.get("transcription", "")))
+
+                    # Optional: show mem_logs
+                    if show_mem_logs:
+                        mem_logs = payload.get("mem_logs")
+                        if isinstance(mem_logs, list) and mem_logs:
+                            st.caption("mem_logs (last 30 lines)")
+                            tail = mem_logs[-30:]
+                            st.code("\n".join([str(x) for x in tail]))
+                        elif mem_logs is not None:
+                            st.caption("mem_logs present but not a list")
+                            st.write(mem_logs)
+
+                    # Optional: show full JSON
+                    with st.expander("Show full JSON"):
+                        st.json(payload)
                 else:
-                    data = resp.json()
-                    # attach RTT to the model's JSON so it shows up in UI
-                    data["rtt_seconds"] = round(rtt, 3)
-                    results[model_label] = data
-            except Exception as e:
-                results[model_label] = {
-                    "error": str(e),
-                    "rtt_seconds": None,
-                }
+                    st.write(payload)
 
-        st.session_state["results"] = results
+        # Debug output
+        if show_debug:
+            st.divider()
+            st.subheader("Debug (request/response timings)")
+            st.json(st.session_state["last_debug"])
 
-# -------------------- Show results --------------------
+        if show_raw_response:
+            st.divider()
+            st.subheader("Raw responses (first 2000 chars)")
+            for model_label, dbg in st.session_state["last_debug"].items():
+                st.write(model_label, dbg)
 
-st.markdown("---")
-st.subheader("3. Model Outputs")
-
-if st.session_state.get("audio_label"):
-    st.markdown(
-        f"**Shared audio filename for this run (client label):** "
-        f"`{st.session_state['audio_label']}`"
-    )
-
-# -------------------- ADDED: global toggle for mem logs --------------------
-with st.expander("Debug UI: Memory logs settings", expanded=False):
-    st.session_state["show_mem_logs"] = st.checkbox(
-        "Show memory logs from backend",
-        value=st.session_state["show_mem_logs"],
-    )
-    st.session_state["mem_log_lines"] = st.slider(
-        "How many last lines to show per model",
-        min_value=5,
-        max_value=200,
-        value=st.session_state["mem_log_lines"],
-        step=5,
-    )
-# --------------------------------------------------------------------------
-
-results = st.session_state.get("results")
-if not results:
-    st.info("Run inference first by clicking **Send to both models**.")
-    st.stop()
-
-col1, col2 = st.columns(2)
-cols = [col1, col2]
-
-for (model_label, result), col in zip(results.items(), cols):
-    with col:
-        st.markdown(f"### {model_label}")
-
-        # RTT line (even if there was an error)
-        rtt_val = result.get("rtt_seconds")
-        if rtt_val is not None:
-            st.markdown(f"**RTT (request–response, s):** `{rtt_val}`")
-
-        if "error" in result:
-            st.error(f"Request failed:\n\n`{result['error']}`")
-            continue
-
-        # Expecting the JSON from /streamlitTranscribe
-        st.markdown(
-            f"**Saved file on server:** `{result.get('file','?')}`  \n"
-            f"**Duration (s):** `{result.get('audio_duration_seconds','?')}`  \n"
-            f"**Speech probability:** `{result.get('speech_probability','?')}`"
-        )
-
-        st.markdown("**Hindi (raw):**")
-        st.code(
-            result.get("raw_hindi", result.get("raw_transcription", "N/A")),
-            language="text",
-        )
-
-        st.markdown("**Hindi (corrected):**")
-        st.code(result.get("corrected_hindi", "N/A"), language="text")
-
-        st.markdown("**English translation:**")
-        st.code(result.get("english_translation", "N/A"), language="text")
-
-        # -------------------- ADDED: show mem logs from backend --------------------
-        if st.session_state["show_mem_logs"]:
-            st.markdown("**Memory logs (backend):**")
-
-            last_line = result.get("mem_logs_last", None)
-            if last_line:
-                st.caption(f"Last: {last_line}")
-
-            mem_logs = result.get("mem_logs", None)
-            if isinstance(mem_logs, list) and len(mem_logs) > 0:
-                n = st.session_state["mem_log_lines"]
-                tail = mem_logs[-n:]
-                st.code("\n".join(tail), language="text")
-            else:
-                st.info("No mem logs returned (backend missing mem_logs fields or empty).")
-        # -------------------------------------------------------------------------
+st.caption("Tip: If microphone recording appears stuck, use Upload WAV. Backend is confirmed working via curl.")
