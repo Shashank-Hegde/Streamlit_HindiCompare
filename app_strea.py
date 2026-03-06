@@ -1,337 +1,229 @@
-#!/usr/bin/env python3
-"""
-Auto-VAD Hindi ASR — Fixed PoC v3
-===================================
 
-Why the previous version failed:
-  - Missing `streamlit-component-lib` script in index.html
-  - Without it, Streamlit.setComponentValue() doesn't exist in JS
-  - Audio was recorded but never sent back to Python
-  - Python never called FastAPI
 
-Fix:
-  - index.html now loads streamlit-component-lib from CDN
-  - Streamlit.setComponentReady() + setComponentValue() work correctly
-  - Python receives audio as base64, proxies to FastAPI via requests
-  - No CORS / mixed-content issues (server-to-server call)
-
-Folder layout required:
-  your_project/
-  ├── streamlit_vad_poc.py       ← this file
-  └── vad_component/
-      └── index.html             ← VAD iframe
-
-Run:
-  streamlit run streamlit_vad_poc.py
-"""
-
-import base64
 import io
-import time
+import time  # <-- NEW
 from datetime import datetime
-from pathlib import Path
 
 import requests
 import streamlit as st
-import streamlit.components.v1 as components
 
-# ── Config ────────────────────────────────────────────────────────────────────
-BACKEND_HOST  = "49.200.100.22"
-MODEL_PORTS   = [6004, 6005]
-TIMEOUT_SEC   = 180
-COMPONENT_DIR = Path(__file__).parent / "vad_component"
+BACKEND_HOST = "49.200.100.22"
+MODEL_PORTS = [6004, 6005]  # FastAPI apps with /streamlitTranscribe
+TIMEOUT_SEC = 180
 
-# ── Page setup ────────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="Auto-VAD Hindi ASR",
-    page_icon="🎙️",
-    layout="wide",
-    initial_sidebar_state="expanded",
+st.set_page_config(page_title="Hindi ASR – Compare Two Models", layout="wide")
+
+st.title("Hindi ASR – Compare Two Models")
+
+st.caption("Speak in Hindi or mixture of Hindi and English")
+
+st.markdown("---")
+
+# -------------------- Audio input (record or upload) --------------------
+
+st.subheader("1. Provide Hindi audio")
+
+input_method = st.radio(
+    "Choose input method:",
+    ["Record with microphone", "Upload WAV file"],
+    index=0,
+    key="audio_input_method",
 )
 
-# ── Declare the custom component ──────────────────────────────────────────────
-# Using declare_component with path= serves index.html as an iframe.
-# Python → JS: kwargs passed to declare_component() become event.detail.args in JS.
-# JS → Python: Streamlit.setComponentValue(obj) returns obj as the function's return value.
-_vad_comp = components.declare_component("vad_recorder", path=str(COMPONENT_DIR))
+audio_bytes = None
 
-def vad_recorder(cfg: dict, key: str = "vad") -> dict | None:
-    """Render VAD component. Returns audio payload dict when an utterance is captured."""
-    return _vad_comp(
-        calibrationMs    = cfg["calibrationMs"],
-        silenceTimeoutMs = cfg["silenceTimeoutMs"],
-        energyMultiplier = cfg["energyMultiplier"],
-        minSpeechMs      = cfg["minSpeechMs"],
-        noiseAlpha       = cfg["noiseAlpha"],
-        echoCancellation = cfg["echoCancellation"],
-        noiseSuppression = cfg["noiseSuppression"],
-        autoGainControl  = cfg["autoGainControl"],
-        key=key,
-        default=None,
+if input_method == "Record with microphone":
+    audio_file = st.audio_input(
+        "Click to record your Hindi audio, then click again to stop:",
+        key="audio_rec",
     )
+    if audio_file is not None:
+        audio_bytes = audio_file.getvalue()
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.markdown("## ⚙️ Configuration")
+elif input_method == "Upload WAV file":
+    uploaded_file = st.file_uploader(
+        "Upload a .wav file with Hindi audio:",
+        type=["wav"],
+        key="audio_upload",
+    )
+    if uploaded_file is not None:
+        # Read the raw bytes from the uploaded WAV
+        audio_bytes = uploaded_file.read()
 
-    selected_port = st.selectbox(
-        "Backend model port",
-        MODEL_PORTS,
-        format_func=lambda p: f"Port {p}",
-    )
-    backend_url = f"http://{BACKEND_HOST}:{selected_port}/streamlitTranscribe"
-    st.caption(f"`{backend_url}`")
+if audio_bytes is None:
+    if input_method == "Record with microphone":
+        st.info("👆 Record some audio to begin.")
+    else:
+        st.info("👆 Upload a .wav file to begin.")
+    st.stop()
 
-    st.markdown("---")
-    st.markdown("### 🔊 VAD Parameters")
+st.success("Audio ready.")
+st.audio(audio_bytes, format="audio/wav")
 
-    calibration_ms = st.slider(
-        "Noise calibration (ms)", 500, 4000, 1500, 100,
-        help="Stay quiet during this phase. App learns room noise level.",
-    )
-    silence_timeout_ms = st.slider(
-        "Silence-to-stop timeout (ms)", 600, 6000, 2000, 100,
-        help="How long silence must last before recording stops. Increase for slower speakers.",
-    )
-    energy_multiplier = st.slider(
-        "Speech sensitivity (lower = more sensitive)", 1.0, 8.0, 2.8, 0.1,
-        help="Threshold = noise_floor × this. Lower in quiet rooms.",
-    )
-    min_speech_ms = st.slider(
-        "Minimum speech duration (ms)", 100, 3000, 400, 50,
-        help="Clips shorter than this are discarded (prevents noise bursts being sent).",
-    )
-    noise_alpha = st.slider(
-        "Noise floor adaptation speed", 0.80, 0.999, 0.97, 0.001,
-        format="%.3f",
-        help="EMA coefficient. Higher = slower adaptation to room changes.",
-    )
-
-    st.markdown("---")
-    st.markdown("### 🎛️ Audio Capture")
-    echo_cancel    = st.checkbox("Echo cancellation",        value=True)
-    noise_suppress = st.checkbox("Browser noise suppression", value=False)
-    auto_gain      = st.checkbox("Auto gain control",         value=False)
-
-    st.markdown("---")
-    st.markdown("### 🔗 Architecture")
-    st.success(
-        "**No more 'Failed to fetch'**\n\n"
-        "Browser → Streamlit Python (HTTPS) → FastAPI (HTTP)\n\n"
-        "Python makes the HTTP call server-side — the browser never touches FastAPI directly."
-    )
-    st.markdown("### ℹ️ How to use")
-    st.info(
-        "1. Click **Start Listening**\n"
-        "2. Stay quiet for ~1.5s calibration\n"
-        "3. Speak in Hindi — recording starts automatically\n"
-        "4. Stop speaking — recording stops after silence timeout\n"
-        "5. Transcription appears below"
-    )
-
-# ── Main page ─────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
-.res-card{
-  background:#161921;border:1px solid rgba(255,255,255,.07);
-  border-radius:12px;padding:16px 18px;margin-bottom:12px;
-  font-family:'IBM Plex Sans',sans-serif;
-}
-.res-head{display:flex;justify-content:space-between;font-size:11px;color:#5a6478;margin-bottom:12px;font-family:'IBM Plex Mono',monospace}
-.flbl{font-size:10px;color:#5a6478;text-transform:uppercase;letter-spacing:.07em;margin-bottom:3px}
-.fval{font-family:'IBM Plex Mono',monospace;font-size:12px;background:rgba(0,0,0,.3);border:1px solid rgba(255,255,255,.06);border-radius:6px;padding:6px 10px;margin-bottom:10px;word-break:break-word;color:#c9d1e0}
-.fen{color:#7dd87d!important;font-size:13px!important}
-.chip{display:inline-block;font-size:10px;padding:2px 8px;border-radius:99px;background:rgba(255,255,255,.06);color:#5a6478;font-family:'IBM Plex Mono',monospace;margin-left:6px}
-.crtt{color:#5b9cf6}.cdur{color:#3ddc84}
-</style>
-""", unsafe_allow_html=True)
-
-st.markdown("# 🎙️ Auto-VAD Hindi ASR")
-st.caption("Hands-free · Browser VAD · Adaptive noise floor · Python-proxied to FastAPI")
 st.markdown("---")
+st.subheader("2. Send to models and view outputs")
 
-# ── Render VAD component ──────────────────────────────────────────────────────
-vad_cfg = {
-    "calibrationMs":    calibration_ms,
-    "silenceTimeoutMs": silence_timeout_ms,
-    "energyMultiplier": energy_multiplier,
-    "minSpeechMs":      min_speech_ms,
-    "noiseAlpha":       noise_alpha,
-    "echoCancellation": echo_cancel,
-    "noiseSuppression": noise_suppress,
-    "autoGainControl":  auto_gain,
-}
+# -------------------- VAD / PANNS threshold slider --------------------
 
-# This renders the iframe AND returns the audio payload when JS calls setComponentValue()
-audio_payload = vad_recorder(vad_cfg, key="vad_main")
+st.markdown("### VAD / Speech detection threshold")
 
-# ── Handle received audio ─────────────────────────────────────────────────────
+vad_threshold = st.slider(
+    "Threshold (lower = more sensitive, higher = stricter)",
+    min_value=0.0,
+    max_value=1.0,
+    value=0.2,   # start near your current PANNS threshold
+    step=0.01,
+    help=(
+        "Controls speech vs noise detection inside the backend "
+        "(PANNS + Silero VAD). Try 0.1–0.3 for noisy audio."
+    ),
+)
+
 if "results" not in st.session_state:
-    st.session_state.results = []
-if "last_ts" not in st.session_state:
-    st.session_state.last_ts = 0
+    st.session_state["results"] = None
 
-if audio_payload and isinstance(audio_payload, dict):
-    ts = audio_payload.get("ts", 0)
+if "audio_label" not in st.session_state:
+    st.session_state["audio_label"] = None
 
-    # Streamlit re-runs on every widget interaction — deduplicate by timestamp
-    if ts and ts != st.session_state.last_ts:
-        st.session_state.last_ts = ts
+# -------------------- ADDED: mem log UI preferences --------------------
+if "show_mem_logs" not in st.session_state:
+    st.session_state["show_mem_logs"] = True
 
-        audio_b64 = audio_payload.get("audio_b64", "")
-        mime_type = audio_payload.get("mime_type", "audio/webm")
-        filename  = audio_payload.get("filename",  f"vad_{ts}.webm")
+if "mem_log_lines" not in st.session_state:
+    st.session_state["mem_log_lines"] = 30  # default show last N lines
+# ----------------------------------------------------------------------
 
-        if audio_b64:
-            audio_bytes = base64.b64decode(audio_b64)
+col_btn, _ = st.columns([1, 3])
 
-            # ── Python → FastAPI (server-side, no CORS, no mixed-content) ──
-            with st.spinner(f"Transcribing `{filename}`…"):
-                t0 = time.perf_counter()
-                try:
-                    resp = requests.post(
-                        backend_url,
-                        data={
-                            "client_filename": filename,
-                            "panns_threshold": "0.2",
-                            "vad_threshold":   "0.2",
-                        },
-                        files={"file": (filename, io.BytesIO(audio_bytes), mime_type)},
-                        timeout=TIMEOUT_SEC,
-                    )
-                    rtt = round(time.perf_counter() - t0, 2)
+with col_btn:
+    if st.button("Send to both models", type="primary"):
+        # ---- Generate ONE shared filename for this audio ----
+        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        audio_label = f"streamlit_hindi_{ts}.wav"
+        st.session_state["audio_label"] = audio_label
 
-                    if resp.status_code == 200:
-                        st.session_state.results.insert(0, {
-                            "status":    "ok",
-                            "data":      resp.json(),
-                            "rtt":       rtt,
-                            "filename":  filename,
-                            "timestamp": datetime.now().strftime("%H:%M:%S"),
-                            "audio":     audio_bytes,
-                            "mime":      mime_type,
-                        })
-                    else:
-                        st.session_state.results.insert(0, {
-                            "status":    "error",
-                            "error":     f"HTTP {resp.status_code}: {resp.text[:400]}",
-                            "rtt":       rtt,
-                            "timestamp": datetime.now().strftime("%H:%M:%S"),
-                        })
+        results = {}
+        for idx, port in enumerate(MODEL_PORTS, start=1):
+            model_label = f"Model {idx}, (Port {port})"
+            url = f"http://{BACKEND_HOST}:{port}/streamlitTranscribe"
 
-                except requests.exceptions.ConnectionError as e:
-                    rtt = round(time.perf_counter() - t0, 2)
-                    st.session_state.results.insert(0, {
-                        "status":    "error",
-                        "error":     (
-                            f"Cannot reach backend at `{backend_url}`\n\n"
-                            f"Check that the FastAPI server is running.\n\n`{e}`"
-                        ),
-                        "rtt":       rtt,
-                        "timestamp": datetime.now().strftime("%H:%M:%S"),
-                    })
-                except Exception as e:
-                    rtt = round(time.perf_counter() - t0, 2)
-                    st.session_state.results.insert(0, {
-                        "status":    "error",
-                        "error":     str(e),
-                        "rtt":       rtt,
-                        "timestamp": datetime.now().strftime("%H:%M:%S"),
-                    })
+            try:
+                start_t = time.perf_counter()
+                resp = requests.post(
+                    url,  # <-- REQUIRED positional argument
+                    data={
+                        "client_filename": audio_label,   # shared logical name
+                        "panns_threshold": vad_threshold, # for PANNS speech/noise
+                        "vad_threshold": vad_threshold,   # for Silero VAD
+                    },
+                    files={
+                        "file": (
+                            "recording.wav",
+                            io.BytesIO(audio_bytes),
+                            "audio/wav",
+                        )
+                    },
+                    timeout=TIMEOUT_SEC,
+                )
+                rtt = time.perf_counter() - start_t  # seconds
 
-            # Keep last 10
-            st.session_state.results = st.session_state.results[:10]
+                if resp.status_code != 200:
+                    results[model_label] = {
+                        "error": f"HTTP {resp.status_code}: {resp.text}",
+                        "rtt_seconds": round(rtt, 3),
+                    }
+                else:
+                    data = resp.json()
+                    # attach RTT to the model's JSON so it shows up in UI
+                    data["rtt_seconds"] = round(rtt, 3)
+                    results[model_label] = data
+            except Exception as e:
+                results[model_label] = {
+                    "error": str(e),
+                    "rtt_seconds": None,
+                }
 
-# ── Display results ───────────────────────────────────────────────────────────
+        st.session_state["results"] = results
+
+# -------------------- Show results --------------------
+
 st.markdown("---")
-st.markdown("### 📋 Transcription Results")
+st.subheader("3. Model Outputs")
 
-if not st.session_state.results:
-    st.info("Results will appear here automatically after each utterance.")
-else:
-    if st.button("🗑 Clear results"):
-        st.session_state.results = []
-        st.rerun()
+if st.session_state.get("audio_label"):
+    st.markdown(
+        f"**Shared audio filename for this run (client label):** "
+        f"`{st.session_state['audio_label']}`"
+    )
 
-    for i, r in enumerate(st.session_state.results):
-        num = len(st.session_state.results) - i
+# -------------------- ADDED: global toggle for mem logs --------------------
+with st.expander("Debug UI: Memory logs settings", expanded=False):
+    st.session_state["show_mem_logs"] = st.checkbox(
+        "Show memory logs from backend",
+        value=st.session_state["show_mem_logs"],
+    )
+    st.session_state["mem_log_lines"] = st.slider(
+        "How many last lines to show per model",
+        min_value=5,
+        max_value=200,
+        value=st.session_state["mem_log_lines"],
+        step=5,
+    )
+# --------------------------------------------------------------------------
 
-        if r["status"] == "error":
-            st.error(f"**Error #{num} · {r['timestamp']} · {r['rtt']}s**\n\n{r['error']}")
+results = st.session_state.get("results")
+if not results:
+    st.info("Run inference first by clicking **Send to both models**.")
+    st.stop()
+
+col1, col2 = st.columns(2)
+cols = [col1, col2]
+
+for (model_label, result), col in zip(results.items(), cols):
+    with col:
+        st.markdown(f"### {model_label}")
+
+        # RTT line (even if there was an error)
+        rtt_val = result.get("rtt_seconds")
+        if rtt_val is not None:
+            st.markdown(f"**RTT (request–response, s):** `{rtt_val}`")
+
+        if "error" in result:
+            st.error(f"Request failed:\n\n`{result['error']}`")
             continue
 
-        d   = r["data"]
-        dur = d.get("audio_duration_seconds")
-        dur_s = f"{dur:.2f}s" if dur is not None else "—"
+        # Expecting the JSON from /streamlitTranscribe
+        st.markdown(
+            f"**Saved file on server:** `{result.get('file','?')}`  \n"
+            f"**Duration (s):** `{result.get('audio_duration_seconds','?')}`  \n"
+            f"**Speech probability:** `{result.get('speech_probability','?')}`"
+        )
 
-        raw_hi  = d.get("raw_hindi", d.get("raw_transcription", "—"))
-        corr_hi = d.get("corrected_hindi", "—")
-        eng     = d.get("english_translation", "—")
+        st.markdown("**Hindi (raw):**")
+        st.code(
+            result.get("raw_hindi", result.get("raw_transcription", "N/A")),
+            language="text",
+        )
 
-        st.markdown(f"""
-<div class="res-card">
-  <div class="res-head">
-    <span>#{num} · {r['timestamp']}</span>
-    <span>
-      <span class="chip cdur">⏱ {dur_s}</span>
-      <span class="chip crtt">↩ {r['rtt']}s</span>
-      <span class="chip">{r['filename']}</span>
-    </span>
-  </div>
-  <div class="flbl">Hindi · raw</div>
-  <div class="fval">{raw_hi}</div>
-  <div class="flbl">Hindi · corrected</div>
-  <div class="fval">{corr_hi}</div>
-  <div class="flbl">English translation</div>
-  <div class="fval fen">{eng}</div>
-</div>
-""", unsafe_allow_html=True)
+        st.markdown("**Hindi (corrected):**")
+        st.code(result.get("corrected_hindi", "N/A"), language="text")
 
-        with st.expander(f"▶ Play clip #{num}"):
-            st.audio(r["audio"], format=r["mime"])
+        st.markdown("**English translation:**")
+        st.code(result.get("english_translation", "N/A"), language="text")
 
-# ── Notes ─────────────────────────────────────────────────────────────────────
-with st.expander("📖 What was fixed & how it works"):
-    st.markdown("""
-    ### Root cause of "Failed to fetch"
-    The original auto-VAD app used `components.html()` which renders JS that called
-    `fetch('http://...')` **directly from the browser**. Streamlit Cloud serves on HTTPS,
-    so browsers block outgoing HTTP calls (mixed-content policy). CORS headers also blocked it.
+        # -------------------- ADDED: show mem logs from backend --------------------
+        if st.session_state["show_mem_logs"]:
+            st.markdown("**Memory logs (backend):**")
 
-    ### Root cause of "transcript not coming" (v2)
-    `components.declare_component()` was used correctly, but `index.html` **did not load
-    `streamlit-component-lib`**, so `Streamlit.setComponentValue()` didn't exist in JS.
-    Audio was recorded but silently never sent to Python.
+            last_line = result.get("mem_logs_last", None)
+            if last_line:
+                st.caption(f"Last: {last_line}")
 
-    ### Fix applied in v3
-    ```html
-    <!-- This one line was missing -->
-    <script src="https://unpkg.com/streamlit-component-lib/dist/StreamlitLib.js"></script>
-    ```
-    Plus:
-    - `Streamlit.setComponentReady()` — signals iframe is ready
-    - `Streamlit.setComponentValue({audio_b64, ...})` — sends audio to Python
-    - `document.addEventListener("streamlit:render", ...)` — receives args from Python
-
-    ### Request flow (fixed)
-    ```
-    Mic → Web Audio API → MediaRecorder → base64
-      → Streamlit.setComponentValue()    [same-origin iframe → Streamlit]
-      → Python receives base64           [decode to bytes]
-      → requests.post(FastAPI)           [server-to-server, no CORS]
-      → JSON result displayed
-    ```
-
-    ### VAD algorithm
-    | Stage | Detail |
-    |---|---|
-    | Calibration | EMA of RMS during quiet → establishes `noise_floor` |
-    | Speech start | `RMS > noise_floor × sensitivity` → `MediaRecorder.start()` |
-    | Pause tolerance | Silence timer resets on every speech frame |
-    | Speech end | `silence_timeout_ms` continuous silence → `MediaRecorder.stop()` |
-    | Noise adapt | Floor updates only when `RMS < threshold × 0.55` (truly quiet) |
-    | Short-clip guard | Clips < `min_speech_ms` silently discarded |
-    """)
-
-st.caption(f"Auto-VAD PoC v3 · Python-proxied · `{backend_url}`")
+            mem_logs = result.get("mem_logs", None)
+            if isinstance(mem_logs, list) and len(mem_logs) > 0:
+                n = st.session_state["mem_log_lines"]
+                tail = mem_logs[-n:]
+                st.code("\n".join(tail), language="text")
+            else:
+                st.info("No mem logs returned (backend missing mem_logs fields or empty).")
+        # -------------------------------------------------------------------------
