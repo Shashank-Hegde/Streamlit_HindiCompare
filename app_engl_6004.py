@@ -5,7 +5,7 @@ from datetime import datetime
 import requests
 import streamlit as st
 
-BACKEND_HOST = "127.0.0.1"
+BACKEND_HOST = "49.200.100.22"
 PORT = 6004
 TIMEOUT_SEC = 180
 
