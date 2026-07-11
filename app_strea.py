@@ -1,229 +1,68 @@
-
-
-import io
-import time  # <-- NEW
-from datetime import datetime
-
-import requests
 import streamlit as st
+import requests
+import time
+import os
 
-BACKEND_HOST = "49.200.100.22"
-MODEL_PORTS = [6004, 6005]  # FastAPI apps with /streamlitTranscribe
-TIMEOUT_SEC = 180
+st.set_page_config(page_title="Hindi ASR – Port 6005", layout="centered")
+st.title("🎙️ Hindi ASR Tester")
+st.caption("Endpoint: `http://localhost:6005/streamlitTranscribe`")
 
-st.set_page_config(page_title="Hindi ASR – Compare Two Models", layout="wide")
+ASR_URL = "http://localhost:6005/streamlitTranscribe"
 
-st.title("Hindi ASR – Compare Two Models")
+uploaded = st.file_uploader("Upload WAV audio", type=["wav", "mp3", "m4a", "ogg", "webm"])
 
-st.caption("Speak in Hindi or mixture of Hindi and English")
+if uploaded:
+    st.audio(uploaded, format=uploaded.type)
 
-st.markdown("---")
-
-# -------------------- Audio input (record or upload) --------------------
-
-st.subheader("1. Provide Hindi audio")
-
-input_method = st.radio(
-    "Choose input method:",
-    ["Record with microphone", "Upload WAV file"],
-    index=0,
-    key="audio_input_method",
-)
-
-audio_bytes = None
-
-if input_method == "Record with microphone":
-    audio_file = st.audio_input(
-        "Click to record your Hindi audio, then click again to stop:",
-        key="audio_rec",
-    )
-    if audio_file is not None:
-        audio_bytes = audio_file.getvalue()
-
-elif input_method == "Upload WAV file":
-    uploaded_file = st.file_uploader(
-        "Upload a .wav file with Hindi audio:",
-        type=["wav"],
-        key="audio_upload",
-    )
-    if uploaded_file is not None:
-        # Read the raw bytes from the uploaded WAV
-        audio_bytes = uploaded_file.read()
-
-if audio_bytes is None:
-    if input_method == "Record with microphone":
-        st.info("👆 Record some audio to begin.")
-    else:
-        st.info("👆 Upload a .wav file to begin.")
-    st.stop()
-
-st.success("Audio ready.")
-st.audio(audio_bytes, format="audio/wav")
-
-st.markdown("---")
-st.subheader("2. Send to models and view outputs")
-
-# -------------------- VAD / PANNS threshold slider --------------------
-
-st.markdown("### VAD / Speech detection threshold")
-
-vad_threshold = st.slider(
-    "Threshold (lower = more sensitive, higher = stricter)",
-    min_value=0.0,
-    max_value=1.0,
-    value=0.2,   # start near your current PANNS threshold
-    step=0.01,
-    help=(
-        "Controls speech vs noise detection inside the backend "
-        "(PANNS + Silero VAD). Try 0.1–0.3 for noisy audio."
-    ),
-)
-
-if "results" not in st.session_state:
-    st.session_state["results"] = None
-
-if "audio_label" not in st.session_state:
-    st.session_state["audio_label"] = None
-
-# -------------------- ADDED: mem log UI preferences --------------------
-if "show_mem_logs" not in st.session_state:
-    st.session_state["show_mem_logs"] = True
-
-if "mem_log_lines" not in st.session_state:
-    st.session_state["mem_log_lines"] = 30  # default show last N lines
-# ----------------------------------------------------------------------
-
-col_btn, _ = st.columns([1, 3])
-
-with col_btn:
-    if st.button("Send to both models", type="primary"):
-        # ---- Generate ONE shared filename for this audio ----
-        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        audio_label = f"streamlit_hindi_{ts}.wav"
-        st.session_state["audio_label"] = audio_label
-
-        results = {}
-        for idx, port in enumerate(MODEL_PORTS, start=1):
-            model_label = f"Model {idx}, (Port {port})"
-            url = f"http://{BACKEND_HOST}:{port}/streamlitTranscribe"
-
+    if st.button("▶ Transcribe"):
+        with st.spinner("Sending to Hindi ASR (port 6005)…"):
             try:
-                start_t = time.perf_counter()
+                t_start = time.time()
                 resp = requests.post(
-                    url,  # <-- REQUIRED positional argument
-                    data={
-                        "client_filename": audio_label,   # shared logical name
-                        "panns_threshold": vad_threshold, # for PANNS speech/noise
-                        "vad_threshold": vad_threshold,   # for Silero VAD
-                    },
-                    files={
-                        "file": (
-                            "recording.wav",
-                            io.BytesIO(audio_bytes),
-                            "audio/wav",
-                        )
-                    },
-                    timeout=TIMEOUT_SEC,
+                    ASR_URL,
+                    files={"file": (uploaded.name, uploaded.getvalue(), uploaded.type)},
+                    data={"client_filename": uploaded.name},
+                    timeout=120,
                 )
-                rtt = time.perf_counter() - start_t  # seconds
+                elapsed = time.time() - t_start
 
-                if resp.status_code != 200:
-                    results[model_label] = {
-                        "error": f"HTTP {resp.status_code}: {resp.text}",
-                        "rtt_seconds": round(rtt, 3),
-                    }
+                if resp.status_code == 200:
+                    j = resp.json()
+
+                    st.success(f"✅ Done in **{elapsed:.2f}s**")
+
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("Audio Duration (s)",
+                                  f"{j.get('audio_duration_seconds', 'N/A'):.2f}"
+                                  if isinstance(j.get('audio_duration_seconds'), (int, float))
+                                  else "N/A")
+                    with col2:
+                        st.metric("API Round-trip (s)", f"{elapsed:.2f}")
+
+                    st.divider()
+
+                    st.subheader("🔤 Raw Hindi")
+                    st.text_area("raw_hindi", value=j.get("raw_hindi", ""), height=80,
+                                 label_visibility="collapsed")
+
+                    st.subheader("✏️ Corrected Hindi")
+                    st.text_area("corrected_hindi", value=j.get("corrected_hindi", ""), height=80,
+                                 label_visibility="collapsed")
+
+                    st.subheader("🌐 English Translation")
+                    st.text_area("english_translation", value=j.get("english_translation", ""), height=80,
+                                 label_visibility="collapsed")
+
+                    with st.expander("Full JSON response"):
+                        st.json(j)
+
                 else:
-                    data = resp.json()
-                    # attach RTT to the model's JSON so it shows up in UI
-                    data["rtt_seconds"] = round(rtt, 3)
-                    results[model_label] = data
+                    st.error(f"HTTP {resp.status_code}: {resp.text}")
+
+            except requests.exceptions.ConnectionError:
+                st.error("❌ Could not connect to port 6005. Is the service running?")
+            except requests.exceptions.Timeout:
+                st.error("❌ Request timed out (>120s).")
             except Exception as e:
-                results[model_label] = {
-                    "error": str(e),
-                    "rtt_seconds": None,
-                }
-
-        st.session_state["results"] = results
-
-# -------------------- Show results --------------------
-
-st.markdown("---")
-st.subheader("3. Model Outputs")
-
-if st.session_state.get("audio_label"):
-    st.markdown(
-        f"**Shared audio filename for this run (client label):** "
-        f"`{st.session_state['audio_label']}`"
-    )
-
-# -------------------- ADDED: global toggle for mem logs --------------------
-with st.expander("Debug UI: Memory logs settings", expanded=False):
-    st.session_state["show_mem_logs"] = st.checkbox(
-        "Show memory logs from backend",
-        value=st.session_state["show_mem_logs"],
-    )
-    st.session_state["mem_log_lines"] = st.slider(
-        "How many last lines to show per model",
-        min_value=5,
-        max_value=200,
-        value=st.session_state["mem_log_lines"],
-        step=5,
-    )
-# --------------------------------------------------------------------------
-
-results = st.session_state.get("results")
-if not results:
-    st.info("Run inference first by clicking **Send to both models**.")
-    st.stop()
-
-col1, col2 = st.columns(2)
-cols = [col1, col2]
-
-for (model_label, result), col in zip(results.items(), cols):
-    with col:
-        st.markdown(f"### {model_label}")
-
-        # RTT line (even if there was an error)
-        rtt_val = result.get("rtt_seconds")
-        if rtt_val is not None:
-            st.markdown(f"**RTT (request–response, s):** `{rtt_val}`")
-
-        if "error" in result:
-            st.error(f"Request failed:\n\n`{result['error']}`")
-            continue
-
-        # Expecting the JSON from /streamlitTranscribe
-        st.markdown(
-            f"**Saved file on server:** `{result.get('file','?')}`  \n"
-            f"**Duration (s):** `{result.get('audio_duration_seconds','?')}`  \n"
-            f"**Speech probability:** `{result.get('speech_probability','?')}`"
-        )
-
-        st.markdown("**Hindi (raw):**")
-        st.code(
-            result.get("raw_hindi", result.get("raw_transcription", "N/A")),
-            language="text",
-        )
-
-        st.markdown("**Hindi (corrected):**")
-        st.code(result.get("corrected_hindi", "N/A"), language="text")
-
-        st.markdown("**English translation:**")
-        st.code(result.get("english_translation", "N/A"), language="text")
-
-        # -------------------- ADDED: show mem logs from backend --------------------
-        if st.session_state["show_mem_logs"]:
-            st.markdown("**Memory logs (backend):**")
-
-            last_line = result.get("mem_logs_last", None)
-            if last_line:
-                st.caption(f"Last: {last_line}")
-
-            mem_logs = result.get("mem_logs", None)
-            if isinstance(mem_logs, list) and len(mem_logs) > 0:
-                n = st.session_state["mem_log_lines"]
-                tail = mem_logs[-n:]
-                st.code("\n".join(tail), language="text")
-            else:
-                st.info("No mem logs returned (backend missing mem_logs fields or empty).")
-        # -------------------------------------------------------------------------
+                st.error(f"❌ Unexpected error: {e}")
