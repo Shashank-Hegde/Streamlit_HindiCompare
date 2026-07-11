@@ -1,7 +1,5 @@
 import io
 import time
-import os
-import tempfile
 from datetime import datetime
 
 import requests
@@ -10,14 +8,13 @@ import streamlit as st
 BACKEND_HOST = "127.0.0.1"
 PORT = 6004
 TIMEOUT_SEC = 180
-VOICE_REQUEST_DIR = "/home/ohealth/ASR_backup/Streamlit/Audio/English"
 
 st.set_page_config(page_title="English ASR – Port 6004", layout="centered")
 st.title("🎙️ English ASR – Port 6004")
 st.caption("Whisper Large V3 — speak in English")
 st.markdown("---")
 
-# -------------------- Audio input (record or upload) --------------------
+# -------------------- Audio input --------------------
 
 st.subheader("1. Provide English audio")
 
@@ -38,7 +35,6 @@ if input_method == "Record with microphone":
     )
     if audio_file is not None:
         audio_bytes = audio_file.getvalue()
-
 else:
     uploaded_file = st.file_uploader(
         "Upload an audio file:",
@@ -81,24 +77,20 @@ if "result" not in st.session_state:
 if st.button("▶ Send to model", type="primary"):
     ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     audio_label = f"streamlit_english_{ts}.wav"
-    save_path = os.path.join(VOICE_REQUEST_DIR, audio_label)
+    url = f"http://{BACKEND_HOST}:{PORT}/streamlitTranscribe"
 
-    url = f"http://{BACKEND_HOST}:{PORT}/convertSpeechToText"
-
-    with st.spinner(f"Saving audio and sending to port {PORT}…"):
+    with st.spinner(f"Sending to port {PORT}…"):
         try:
-            # Save audio to VOICE_REQUEST_DIR so backend can find it
-            os.makedirs(VOICE_REQUEST_DIR, exist_ok=True)
-            with open(save_path, "wb") as f:
-                f.write(audio_bytes)
-
             start_t = time.perf_counter()
             resp = requests.post(
                 url,
-                json={
-                    "audioFileName": audio_label,
+                data={
+                    "client_filename": audio_label,
                     "panns_threshold": vad_threshold,
                     "vad_threshold": vad_threshold,
+                },
+                files={
+                    "file": (upload_name, io.BytesIO(audio_bytes), "audio/wav")
                 },
                 timeout=TIMEOUT_SEC,
             )
@@ -127,12 +119,7 @@ st.markdown("---")
 st.subheader("4. Output")
 
 rtt_val = result.get("rtt_seconds")
-
-# Duration — may be in results[0] or top-level
-dur_val = None
-results_list = result.get("results", [])
-if results_list and isinstance(results_list, list):
-    dur_val = results_list[0].get("audio_duration_seconds")
+dur_val = result.get("audio_duration_seconds")
 
 m1, m2 = st.columns(2)
 m1.metric("RTT (s)", f"{rtt_val}" if rtt_val is not None else "—")
@@ -143,20 +130,11 @@ if "error" in result:
     st.error(f"Request failed:\n\n`{result['error']}`")
     st.stop()
 
-# Pull from results list if present, else top-level
-if results_list:
-    r = results_list[0]
-    raw_text = r.get("raw_transcription", "N/A")
-    eng_text = r.get("english_translation", result.get("transcription", "N/A"))
-else:
-    raw_text = result.get("raw_transcription", "N/A")
-    eng_text = result.get("english_translation", result.get("transcription", "N/A"))
-
 st.markdown("**🔤 Raw transcription:**")
-st.code(raw_text, language="text")
+st.code(result.get("raw_transcription", "N/A"), language="text")
 
 st.markdown("**🌐 English (processed):**")
-st.code(eng_text, language="text")
+st.code(result.get("english_translation", "N/A"), language="text")
 
 with st.expander("Full JSON response"):
     st.json(result)
