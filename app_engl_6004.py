@@ -11,7 +11,7 @@ TIMEOUT_SEC = 180
 
 st.set_page_config(page_title="English ASR – Port 6004", layout="centered")
 st.title("🎙️ English ASR – Port 6004")
-st.caption("Whisper Large V3 — speak in English")
+st.caption("audio in English")
 st.markdown("---")
 
 # -------------------- Audio input --------------------
