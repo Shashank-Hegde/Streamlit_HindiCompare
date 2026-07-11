@@ -1,68 +1,149 @@
-import streamlit as st
-import requests
+import io
 import time
-import os
+from datetime import datetime
+
+import requests
+import streamlit as st
+
+BACKEND_HOST = "49.200.100.22"
+PORT = 6005
+TIMEOUT_SEC = 180
 
 st.set_page_config(page_title="Hindi ASR – Port 6005", layout="centered")
-st.title("🎙️ Hindi ASR Tester")
-st.caption("Endpoint: `http://localhost:6005/streamlitTranscribe`")
+st.title("🎙️ Hindi ASR – Port 6005")
+st.caption("Speak in Hindi or a mixture of Hindi and English")
+st.markdown("---")
 
-ASR_URL = "http://localhost:6005/streamlitTranscribe"
+# -------------------- Audio input (record or upload) --------------------
 
-uploaded = st.file_uploader("Upload WAV audio", type=["wav", "mp3", "m4a", "ogg", "webm"])
+st.subheader("1. Provide Hindi audio")
 
-if uploaded:
-    st.audio(uploaded, format=uploaded.type)
+input_method = st.radio(
+    "Choose input method:",
+    ["Record with microphone", "Upload audio file"],
+    index=0,
+    key="audio_input_method",
+)
 
-    if st.button("▶ Transcribe"):
-        with st.spinner("Sending to Hindi ASR (port 6005)…"):
-            try:
-                t_start = time.time()
-                resp = requests.post(
-                    ASR_URL,
-                    files={"file": (uploaded.name, uploaded.getvalue(), uploaded.type)},
-                    data={"client_filename": uploaded.name},
-                    timeout=120,
-                )
-                elapsed = time.time() - t_start
+audio_bytes = None
+upload_name = "recording.wav"
 
-                if resp.status_code == 200:
-                    j = resp.json()
+if input_method == "Record with microphone":
+    audio_file = st.audio_input(
+        "Click to record, then click again to stop:",
+        key="audio_rec",
+    )
+    if audio_file is not None:
+        audio_bytes = audio_file.getvalue()
 
-                    st.success(f"✅ Done in **{elapsed:.2f}s**")
+else:
+    uploaded_file = st.file_uploader(
+        "Upload an audio file:",
+        type=["wav", "mp3", "m4a", "ogg", "webm"],
+        key="audio_upload",
+    )
+    if uploaded_file is not None:
+        audio_bytes = uploaded_file.read()
+        upload_name = uploaded_file.name
 
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.metric("Audio Duration (s)",
-                                  f"{j.get('audio_duration_seconds', 'N/A'):.2f}"
-                                  if isinstance(j.get('audio_duration_seconds'), (int, float))
-                                  else "N/A")
-                    with col2:
-                        st.metric("API Round-trip (s)", f"{elapsed:.2f}")
+if audio_bytes is None:
+    st.info("👆 Record or upload audio to begin.")
+    st.stop()
 
-                    st.divider()
+st.success("Audio ready.")
+st.audio(audio_bytes, format="audio/wav")
 
-                    st.subheader("🔤 Raw Hindi")
-                    st.text_area("raw_hindi", value=j.get("raw_hindi", ""), height=80,
-                                 label_visibility="collapsed")
+st.markdown("---")
 
-                    st.subheader("✏️ Corrected Hindi")
-                    st.text_area("corrected_hindi", value=j.get("corrected_hindi", ""), height=80,
-                                 label_visibility="collapsed")
+# -------------------- VAD threshold --------------------
 
-                    st.subheader("🌐 English Translation")
-                    st.text_area("english_translation", value=j.get("english_translation", ""), height=80,
-                                 label_visibility="collapsed")
+st.subheader("2. Settings")
 
-                    with st.expander("Full JSON response"):
-                        st.json(j)
+vad_threshold = st.slider(
+    "VAD / Speech detection threshold (lower = more sensitive)",
+    min_value=0.0,
+    max_value=1.0,
+    value=0.2,
+    step=0.01,
+)
 
-                else:
-                    st.error(f"HTTP {resp.status_code}: {resp.text}")
+# -------------------- Send --------------------
 
-            except requests.exceptions.ConnectionError:
-                st.error("❌ Could not connect to port 6005. Is the service running?")
-            except requests.exceptions.Timeout:
-                st.error("❌ Request timed out (>120s).")
-            except Exception as e:
-                st.error(f"❌ Unexpected error: {e}")
+st.markdown("---")
+st.subheader("3. Run inference")
+
+if "result" not in st.session_state:
+    st.session_state["result"] = None
+
+if st.button("▶ Send to model", type="primary"):
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    audio_label = f"streamlit_hindi_{ts}.wav"
+
+    url = f"http://{BACKEND_HOST}:{PORT}/streamlitTranscribe"
+
+    with st.spinner(f"Sending to port {PORT}…"):
+        try:
+            start_t = time.perf_counter()
+            resp = requests.post(
+                url,
+                data={
+                    "client_filename": audio_label,
+                    "panns_threshold": vad_threshold,
+                    "vad_threshold": vad_threshold,
+                },
+                files={
+                    "file": (
+                        upload_name,
+                        io.BytesIO(audio_bytes),
+                        "audio/wav",
+                    )
+                },
+                timeout=TIMEOUT_SEC,
+            )
+            rtt = time.perf_counter() - start_t
+
+            if resp.status_code != 200:
+                st.session_state["result"] = {
+                    "error": f"HTTP {resp.status_code}: {resp.text}",
+                    "rtt_seconds": round(rtt, 3),
+                }
+            else:
+                data = resp.json()
+                data["rtt_seconds"] = round(rtt, 3)
+                st.session_state["result"] = data
+
+        except Exception as e:
+            st.session_state["result"] = {"error": str(e), "rtt_seconds": None}
+
+# -------------------- Show results --------------------
+
+result = st.session_state.get("result")
+if not result:
+    st.stop()
+
+st.markdown("---")
+st.subheader("4. Output")
+
+rtt_val = result.get("rtt_seconds")
+dur_val = result.get("audio_duration_seconds")
+
+m1, m2 = st.columns(2)
+m1.metric("RTT (s)", f"{rtt_val}" if rtt_val is not None else "—")
+m2.metric("Audio duration (s)",
+          f"{dur_val:.2f}" if isinstance(dur_val, (int, float)) else "—")
+
+if "error" in result:
+    st.error(f"Request failed:\n\n`{result['error']}`")
+    st.stop()
+
+st.markdown("**🔤 Raw Hindi:**")
+st.code(result.get("raw_hindi", result.get("raw_transcription", "N/A")), language="text")
+
+st.markdown("**✏️ Corrected Hindi:**")
+st.code(result.get("corrected_hindi", "N/A"), language="text")
+
+st.markdown("**🌐 English translation:**")
+st.code(result.get("english_translation", "N/A"), language="text")
+
+with st.expander("Full JSON response"):
+    st.json(result)
