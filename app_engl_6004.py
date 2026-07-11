@@ -10,7 +10,7 @@ import streamlit as st
 BACKEND_HOST = "127.0.0.1"
 PORT = 6004
 TIMEOUT_SEC = 180
-VOICE_REQUEST_DIR = "/home/oobadmin/nodejs_final/data/voice_request_files"
+VOICE_REQUEST_DIR = "/home/ohealth/ASR_backup/Streamlit/Audio/English"
 
 st.set_page_config(page_title="English ASR – Port 6004", layout="centered")
 st.title("🎙️ English ASR – Port 6004")
