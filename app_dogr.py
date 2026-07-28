@@ -1,5 +1,3 @@
-
-
 import io
 import time
 
@@ -72,7 +70,8 @@ col_btn, col_info = st.columns([1, 3])
 
 with col_btn:
     if st.button("Run Dogri ASR", type="primary"):
-        url = f"http://{BACKEND_HOST}:{BACKEND_PORT}/convertSpeechToText"
+        # FIX 1: use /streamlitTranscribe — accepts multipart UploadFile
+        url = f"http://{BACKEND_HOST}:{BACKEND_PORT}/streamlitTranscribe"
         IST = timezone(timedelta(hours=5, minutes=30))
         now = datetime.now(IST)
         timestamp_str = now.strftime("%d_%m_%H%M_%S") + "_" + str(now.microsecond // 1000).zfill(3)
@@ -83,7 +82,6 @@ with col_btn:
             resp = requests.post(
                 url,
                 files={
-                    # Backend expects multipart field name "file"
                     "file": (filename, io.BytesIO(audio_bytes), "audio/wav")
                 },
                 timeout=TIMEOUT_SEC,
@@ -97,8 +95,8 @@ with col_btn:
             else:
                 data = resp.json()
                 st.session_state["result"] = data
-                # Backend returns the saved filename in "uploaded_filename"
-                st.session_state["saved_filename"] = data.get("uploaded_filename")
+                # FIX 2: /streamlitTranscribe returns "file", not "uploaded_filename"
+                st.session_state["saved_filename"] = data.get("file")
 
         except Exception as e:
             st.session_state["result"] = {"error": str(e)}
@@ -108,7 +106,7 @@ with col_btn:
 with col_info:
     if st.session_state.get("saved_filename"):
         st.markdown(f"**Saved on backend server as:** `{st.session_state['saved_filename']}`")
-    st.markdown(f"**Backend URL:** `http://{BACKEND_HOST}:{BACKEND_PORT}/convertSpeechToText`")
+    st.markdown(f"**Backend URL:** `http://{BACKEND_HOST}:{BACKEND_PORT}/streamlitTranscribe`")
 
 # ---------------- Show output ----------------
 st.markdown("---")
@@ -128,10 +126,11 @@ if "error" in result:
     st.stop()
 
 st.markdown("**Dogri transcript:**")
-st.code(result.get("Dogri_transcript", "N/A"), language="text")
+# FIX 3: /streamlitTranscribe returns "corrected_hindi", not "Dogri_transcript"
+st.code(result.get("corrected_hindi", "N/A"), language="text")
 
 st.markdown("**English translation:**")
 st.code(result.get("english_translation", "N/A"), language="text")
 
 st.markdown("**Backend audio_file field (basename):**")
-st.code(result.get("audio_file", "N/A"), language="text")
+st.code(result.get("file", "N/A"), language="text")
